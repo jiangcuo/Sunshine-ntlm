@@ -8,6 +8,7 @@
 // standard includes
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 #include <utility>
 
@@ -841,6 +842,71 @@ namespace nvhttp {
     });
 
     auto args = request->parse_query_string();
+
+    // 新增：用户认证函数
+    auto authenticate_user = [](const std::string& username, const std::string& password) -> bool {
+      // 从配置文件读取用户信息
+      std::string config_file = "sunshine_users.conf";
+      std::ifstream file(config_file);
+      
+      if (!file.is_open()) {
+        // 如果配置文件不存在，使用默认的硬编码验证
+        BOOST_LOG(warning) << "User config file not found, using default credentials";
+        return (username == "admin" && password == "password123") ||
+               (username == "user" && password == "123456");
+      }
+      
+      std::string line;
+      while (std::getline(file, line)) {
+        // 跳过注释和空行
+        if (line.empty() || line[0] == '#') continue;
+        
+        // 格式: username:password
+        size_t pos = line.find(':');
+        if (pos != std::string::npos) {
+          std::string file_username = line.substr(0, pos);
+          std::string file_password = line.substr(pos + 1);
+          
+          if (file_username == username && file_password == password) {
+            file.close();
+            return true;
+          }
+        }
+      }
+      
+      file.close();
+      return false;
+    };
+
+    // 新增：检查是否启用用户名密码认证
+    auto enable_userpass_it = args.find("enable_userpass");
+    bool enable_userpass = enable_userpass_it != args.end() && enable_userpass_it->second == "true";
+    
+    if (enable_userpass) {
+      // 验证用户名密码
+      auto username_it = args.find("username");
+      auto password_it = args.find("password");
+      
+      if (username_it == args.end() || password_it == args.end()) {
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Missing username or password");
+        return;
+      }
+      
+      std::string username = username_it->second;
+      std::string password = password_it->second;
+      
+      if (!authenticate_user(username, password)) {
+        BOOST_LOG(warning) << "Authentication failed for user: " << username;
+        
+        tree.put("root.<xmlattr>.status_code", 401);
+        tree.put("root.<xmlattr>.status_message", "Authentication failed");
+        return;
+      }
+      
+      BOOST_LOG(info) << "User authenticated successfully: " << username;
+    }
+
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args) ||
