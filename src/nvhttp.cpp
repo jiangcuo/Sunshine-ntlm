@@ -145,6 +145,83 @@ namespace nvhttp {
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
 
+  // 全局用户名密码认证配置
+  bool enable_userpass_auth = false;
+
+  // 通用用户名密码认证函数
+  bool authenticate_user_credentials(const std::string& username, const std::string& password) {
+    BOOST_LOG(info) << "[AUTH] Attempting to authenticate user: " << username;
+    BOOST_LOG(debug) << "[AUTH] Password length: " << password.length() << " characters";
+    
+    // 从配置文件读取用户信息
+    std::string config_file = "sunshine_users.conf";
+    std::ifstream file(config_file);
+    
+    if (!file.is_open()) {
+      // 如果配置文件不存在，使用默认的硬编码验证
+      BOOST_LOG(warning) << "[AUTH] User config file '" << config_file << "' not found, using default credentials";
+      
+      bool default_auth_result = (username == "admin" && password == "password123") ||
+                               (username == "user" && password == "123456");
+      
+      if (default_auth_result) {
+        BOOST_LOG(info) << "[AUTH] User '" << username << "' authenticated successfully using default credentials";
+      } else {
+        BOOST_LOG(warning) << "[AUTH] User '" << username << "' authentication failed - not in default credentials";
+      }
+      
+      return default_auth_result;
+    }
+    
+    BOOST_LOG(info) << "[AUTH] Reading user config file: " << config_file;
+    
+    std::string line;
+    int line_number = 0;
+    int valid_users_count = 0;
+    
+    while (std::getline(file, line)) {
+      line_number++;
+      
+      // 跳过注释和空行
+      if (line.empty() || line[0] == '#') {
+        BOOST_LOG(debug) << "[AUTH] Skipping line " << line_number << " (comment or empty)";
+        continue;
+      }
+      
+      // 格式: username:password
+      size_t pos = line.find(':');
+      if (pos != std::string::npos) {
+        std::string file_username = line.substr(0, pos);
+        std::string file_password = line.substr(pos + 1);
+        valid_users_count++;
+        
+        BOOST_LOG(debug) << "[AUTH] Line " << line_number << ": Found user '" << file_username << "'";
+        
+        if (file_username == username) {
+          BOOST_LOG(info) << "[AUTH] Found matching username '" << username << "' in config file";
+          
+          if (file_password == password) {
+            BOOST_LOG(info) << "[AUTH] Password match successful for user '" << username << "'";
+            file.close();
+            return true;
+          } else {
+            BOOST_LOG(warning) << "[AUTH] Password mismatch for user '" << username << "'";
+            file.close();
+            return false;
+          }
+        }
+      } else {
+        BOOST_LOG(warning) << "[AUTH] Invalid format on line " << line_number << " (missing ':')";
+      }
+    }
+    
+    BOOST_LOG(info) << "[AUTH] Config file processed: " << valid_users_count << " valid users found";
+    BOOST_LOG(warning) << "[AUTH] User '" << username << "' not found in config file";
+    
+    file.close();
+    return false;
+  }
+
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
@@ -513,22 +590,34 @@ namespace nvhttp {
 
   template<class T>
   void print_req(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
-    BOOST_LOG(debug) << "TUNNEL :: "sv << tunnel<T>::to_string;
+    BOOST_LOG(info) << "[REQUEST] " << request->method << " " << request->path << " via " << tunnel<T>::to_string;
 
-    BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
+    auto remote_addr = request->remote_endpoint().address().to_string();
+    auto remote_port = request->remote_endpoint().port();
+    BOOST_LOG(info) << "[REQUEST] Client: " << remote_addr << ":" << remote_port;
 
+    // Log important headers
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      if (name == "User-Agent" || name == "Content-Type" || name == "Content-Length") {
+        BOOST_LOG(debug) << "[REQUEST] Header: " << name << " = " << val;
+      }
     }
 
-    BOOST_LOG(debug) << " [--] "sv;
-
-    for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << val;
+    // Log query parameters (but mask sensitive ones)
+    auto query_params = request->parse_query_string();
+    for (auto &[name, val] : query_params) {
+      if (name == "password") {
+        BOOST_LOG(debug) << "[REQUEST] Param: " << name << " = [MASKED]";
+      } else if (name == "username" || name == "enable_userpass" || name == "appid" || name == "uniqueid") {
+        BOOST_LOG(debug) << "[REQUEST] Param: " << name << " = " << val;
+      } else if (val.length() > 50) {
+        BOOST_LOG(debug) << "[REQUEST] Param: " << name << " = " << val.substr(0, 50) << "... [truncated]";
+      } else {
+        BOOST_LOG(debug) << "[REQUEST] Param: " << name << " = " << val;
+      }
     }
-
-    BOOST_LOG(debug) << " [--] "sv;
+    
+    BOOST_LOG(debug) << "[REQUEST] Total query parameters: " << query_params.size();
   }
 
   template<class T>
@@ -793,6 +882,7 @@ namespace nvhttp {
   }
 
   void applist(resp_https_t response, req_https_t request) {
+    BOOST_LOG(info) << "[APPLIST] Processing applist request";
     print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
@@ -805,11 +895,67 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
-    auto &apps = tree.add_child("root", pt::ptree {});
+    BOOST_LOG(debug) << "[APPLIST] User-pass auth mode enabled: " << (enable_userpass_auth ? "true" : "false");
+    
+    // 如果启用了用户名密码认证模式，进行认证检查
+    if (enable_userpass_auth) {
+      BOOST_LOG(info) << "[APPLIST] User-pass authentication mode is enabled, checking for credentials";
+      
+      auto args = request->parse_query_string();
+      auto enable_userpass_it = args.find("enable_userpass");
+      bool enable_userpass = enable_userpass_it != args.end() && enable_userpass_it->second == "true";
+      
+      BOOST_LOG(debug) << "[APPLIST] Request has enable_userpass parameter: " << (enable_userpass ? "true" : "false");
+      
+      if (enable_userpass) {
+        BOOST_LOG(info) << "[APPLIST] Client requested user-pass authentication, checking credentials";
+        
+        auto username_it = args.find("username");
+        auto password_it = args.find("password");
+        
+        if (username_it == args.end() || password_it == args.end()) {
+          BOOST_LOG(warning) << "[APPLIST] Missing username or password in request";
+          BOOST_LOG(debug) << "[APPLIST] Username present: " << (username_it != args.end() ? "true" : "false");
+          BOOST_LOG(debug) << "[APPLIST] Password present: " << (password_it != args.end() ? "true" : "false");
+          
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "Missing username or password");
+          return;
+        }
+        
+        std::string username = username_it->second;
+        std::string password = password_it->second;
+        
+        BOOST_LOG(info) << "[APPLIST] Authenticating user '" << username << "' for applist request";
+        
+        if (!authenticate_user_credentials(username, password)) {
+          BOOST_LOG(warning) << "[APPLIST] Authentication failed for user: " << username;
+          tree.put("root.<xmlattr>.status_code", 401);
+          tree.put("root.<xmlattr>.status_message", "Authentication failed");
+          return;
+        }
+        
+        BOOST_LOG(info) << "[APPLIST] User '" << username << "' authenticated successfully for applist request";
+      } else {
+        BOOST_LOG(debug) << "[APPLIST] Client did not request user-pass authentication, proceeding without credentials check";
+      }
+    } else {
+      BOOST_LOG(debug) << "[APPLIST] User-pass authentication mode disabled, proceeding without credentials check";
+    }
 
+    BOOST_LOG(info) << "[APPLIST] Authentication successful, generating application list";
+    
+    auto available_apps = proc::proc.get_apps();
+    BOOST_LOG(info) << "[APPLIST] Found " << available_apps.size() << " available applications";
+
+    auto &apps = tree.add_child("root", pt::ptree {});
     apps.put("<xmlattr>.status_code", 200);
 
-    for (auto &proc : proc::proc.get_apps()) {
+    int app_index = 0;
+    for (auto &proc : available_apps) {
+      app_index++;
+      BOOST_LOG(debug) << "[APPLIST] Adding app " << app_index << ": ID=" << proc.id << ", Name='" << proc.name << "'";
+      
       pt::ptree app;
 
       app.put("IsHdrSupported"s, video::active_hevc_mode == 3 ? 1 : 0);
@@ -818,6 +964,8 @@ namespace nvhttp {
 
       apps.push_back(std::make_pair("App", std::move(app)));
     }
+    
+    BOOST_LOG(info) << "[APPLIST] Successfully generated application list with " << app_index << " apps";
   }
 
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
@@ -843,51 +991,29 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
 
-    // 新增：用户认证函数
-    auto authenticate_user = [](const std::string& username, const std::string& password) -> bool {
-      // 从配置文件读取用户信息
-      std::string config_file = "sunshine_users.conf";
-      std::ifstream file(config_file);
-      
-      if (!file.is_open()) {
-        // 如果配置文件不存在，使用默认的硬编码验证
-        BOOST_LOG(warning) << "User config file not found, using default credentials";
-        return (username == "admin" && password == "password123") ||
-               (username == "user" && password == "123456");
-      }
-      
-      std::string line;
-      while (std::getline(file, line)) {
-        // 跳过注释和空行
-        if (line.empty() || line[0] == '#') continue;
-        
-        // 格式: username:password
-        size_t pos = line.find(':');
-        if (pos != std::string::npos) {
-          std::string file_username = line.substr(0, pos);
-          std::string file_password = line.substr(pos + 1);
-          
-          if (file_username == username && file_password == password) {
-            file.close();
-            return true;
-          }
-        }
-      }
-      
-      file.close();
-      return false;
-    };
 
+
+    BOOST_LOG(info) << "[LAUNCH] Processing launch request";
+    BOOST_LOG(debug) << "[LAUNCH] User-pass auth mode enabled: " << (enable_userpass_auth ? "true" : "false");
+    
     // 新增：检查是否启用用户名密码认证
     auto enable_userpass_it = args.find("enable_userpass");
     bool enable_userpass = enable_userpass_it != args.end() && enable_userpass_it->second == "true";
     
+    BOOST_LOG(debug) << "[LAUNCH] Request has enable_userpass parameter: " << (enable_userpass ? "true" : "false");
+    
     if (enable_userpass) {
+      BOOST_LOG(info) << "[LAUNCH] Client requested user-pass authentication for launch";
+      
       // 验证用户名密码
       auto username_it = args.find("username");
       auto password_it = args.find("password");
       
       if (username_it == args.end() || password_it == args.end()) {
+        BOOST_LOG(warning) << "[LAUNCH] Missing username or password in launch request";
+        BOOST_LOG(debug) << "[LAUNCH] Username present: " << (username_it != args.end() ? "true" : "false");
+        BOOST_LOG(debug) << "[LAUNCH] Password present: " << (password_it != args.end() ? "true" : "false");
+        
         tree.put("root.<xmlattr>.status_code", 400);
         tree.put("root.<xmlattr>.status_message", "Missing username or password");
         return;
@@ -896,15 +1022,19 @@ namespace nvhttp {
       std::string username = username_it->second;
       std::string password = password_it->second;
       
-      if (!authenticate_user(username, password)) {
-        BOOST_LOG(warning) << "Authentication failed for user: " << username;
+      BOOST_LOG(info) << "[LAUNCH] Authenticating user '" << username << "' for launch request";
+      
+      if (!authenticate_user_credentials(username, password)) {
+        BOOST_LOG(warning) << "[LAUNCH] Authentication failed for user: " << username;
         
         tree.put("root.<xmlattr>.status_code", 401);
         tree.put("root.<xmlattr>.status_message", "Authentication failed");
         return;
       }
       
-      BOOST_LOG(info) << "User authenticated successfully: " << username;
+      BOOST_LOG(info) << "[LAUNCH] User '" << username << "' authenticated successfully for launch";
+    } else {
+      BOOST_LOG(debug) << "[LAUNCH] No user-pass authentication requested, proceeding without credentials check";
     }
 
     if (
@@ -1132,22 +1262,73 @@ namespace nvhttp {
 
   bool is_client_enabled(const std::string_view cert_pem);
 
+  void enable_user_pass_auth(bool enabled) {
+    BOOST_LOG(info) << "[CONFIG] Changing user-pass authentication mode: " << (enabled ? "ENABLING" : "DISABLING");
+    
+    bool previous_state = enable_userpass_auth;
+    enable_userpass_auth = enabled;
+    
+    if (enabled) {
+      BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now ENABLED";
+      BOOST_LOG(info) << "[CONFIG] SSL certificate verification will be bypassed";
+      BOOST_LOG(info) << "[CONFIG] Clients must provide username/password for applist and launch requests";
+      
+      // 检查用户配置文件是否存在
+      std::ifstream config_file("sunshine_users.conf");
+      if (config_file.is_open()) {
+        BOOST_LOG(info) << "[CONFIG] User configuration file 'sunshine_users.conf' found";
+        config_file.close();
+      } else {
+        BOOST_LOG(warning) << "[CONFIG] User configuration file 'sunshine_users.conf' not found";
+        BOOST_LOG(warning) << "[CONFIG] Default credentials will be used: admin:password123, user:123456";
+      }
+    } else {
+      BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now DISABLED";
+      BOOST_LOG(info) << "[CONFIG] Standard SSL certificate verification will be used";
+    }
+    
+    if (previous_state != enabled) {
+      BOOST_LOG(info) << "[CONFIG] Authentication mode changed successfully";
+    } else {
+      BOOST_LOG(debug) << "[CONFIG] Authentication mode unchanged (already " << (enabled ? "enabled" : "disabled") << ")";
+    }
+  }
+
   void start() {
+    BOOST_LOG(info) << "[SERVER] Starting Sunshine NVHTTP server";
     platf::set_thread_name("nvhttp");
+    
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
     auto port_http = net::map_port(PORT_HTTP);
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
 
+    BOOST_LOG(info) << "[SERVER] HTTP port: " << port_http;
+    BOOST_LOG(info) << "[SERVER] HTTPS port: " << port_https;
+    BOOST_LOG(info) << "[SERVER] Address family: " << address_family;
+    BOOST_LOG(info) << "[SERVER] User-pass auth mode: " << (enable_userpass_auth ? "ENABLED" : "DISABLED");
+
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
+    BOOST_LOG(debug) << "[SERVER] Clean slate mode: " << (clean_slate ? "true" : "false");
 
     if (!clean_slate) {
+      BOOST_LOG(info) << "[SERVER] Loading saved state...";
       load_state();
+    } else {
+      BOOST_LOG(info) << "[SERVER] Starting with clean slate (no saved state)";
     }
 
+    BOOST_LOG(info) << "[SERVER] Loading SSL certificates...";
     auto pkey = file_handler::read_file(config::nvhttp.pkey.c_str());
     auto cert = file_handler::read_file(config::nvhttp.cert.c_str());
+    
+    if (pkey.empty() || cert.empty()) {
+      BOOST_LOG(error) << "[SERVER] Failed to load SSL certificates";
+    } else {
+      BOOST_LOG(info) << "[SERVER] SSL certificates loaded successfully";
+    }
+    
     setup(pkey, cert);
 
     auto add_cert = std::make_shared<safe::queue_t<crypto::x509_t>>(30);
@@ -1161,6 +1342,17 @@ namespace nvhttp {
 
     // Verify certificates after establishing connection
     https_server.verify = [add_cert](SSL *ssl) {
+      BOOST_LOG(debug) << "[SSL] SSL certificate verification callback triggered";
+      
+      // 如果启用了用户名密码认证模式，允许连接通过SSL验证
+      if (enable_userpass_auth) {
+        BOOST_LOG(info) << "[SSL] User-pass auth mode enabled, bypassing SSL certificate verification";
+        BOOST_LOG(debug) << "[SSL] Allowing SSL connection without certificate validation";
+        return 1;
+      }
+      
+      BOOST_LOG(debug) << "[SSL] User-pass auth mode disabled, performing standard SSL certificate verification";
+
       crypto::x509_t x509 {
 #if OPENSSL_VERSION_MAJOR >= 3
         SSL_get1_peer_certificate(ssl)
@@ -1169,10 +1361,11 @@ namespace nvhttp {
 #endif
       };
       if (!x509) {
-        BOOST_LOG(info) << "unknown -- denied"sv;
+        BOOST_LOG(warning) << "[SSL] No client certificate provided -- connection denied";
         return 0;
       }
 
+      BOOST_LOG(debug) << "[SSL] Client certificate received, starting verification process";
       int verified = 0;
 
       auto fg = util::fail_guard([&]() {
@@ -1180,23 +1373,33 @@ namespace nvhttp {
 
         X509_NAME_oneline(X509_get_subject_name(x509.get()), subject_name, sizeof(subject_name));
 
-        BOOST_LOG(debug) << subject_name << " -- "sv << (verified ? "verified"sv : "denied"sv);
+        BOOST_LOG(info) << "[SSL] Certificate verification result: " << subject_name << " -- " << (verified ? "verified" : "denied");
       });
 
+      BOOST_LOG(debug) << "[SSL] Checking for new certificates to add to trust chain...";
+      int new_certs_added = 0;
       while (add_cert->peek()) {
         char subject_name[256];
 
         auto cert = add_cert->pop();
         X509_NAME_oneline(X509_get_subject_name(cert.get()), subject_name, sizeof(subject_name));
 
-        BOOST_LOG(debug) << "Added cert ["sv << subject_name << ']';
+        BOOST_LOG(info) << "[SSL] Added new trusted certificate: [" << subject_name << "]";
         cert_chain.add(std::move(cert));
+        new_certs_added++;
+      }
+      
+      if (new_certs_added > 0) {
+        BOOST_LOG(info) << "[SSL] Added " << new_certs_added << " new certificates to trust chain";
+      } else {
+        BOOST_LOG(debug) << "[SSL] No new certificates to add";
       }
 
+      BOOST_LOG(debug) << "[SSL] Verifying client certificate against trust chain...";
       auto err_str = cert_chain.verify(x509.get());
       if (err_str) {
-        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
-
+        BOOST_LOG(warning) << "[SSL] Certificate verification failed: " << err_str;
+        BOOST_LOG(debug) << "[SSL] Client certificate is not in trusted certificate chain";
         return verified;
       }
 
@@ -1207,6 +1410,7 @@ namespace nvhttp {
         return verified;
       }
 
+      BOOST_LOG(info) << "[SSL] Certificate verification successful - client is trusted";
       verified = 1;
 
       return verified;
@@ -1256,33 +1460,53 @@ namespace nvhttp {
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
 
-    auto accept_and_run = [&](auto *http_server) {
+    auto accept_and_run = [&](auto *http_server, const std::string& server_type) {
       try {
         std::string name = "nvhttp::" + std::to_string(http_server->config.port);
         platf::set_thread_name(name);
+        BOOST_LOG(info) << "[SERVER] Starting " << server_type << " server...";
         http_server->start();
+        BOOST_LOG(info) << "[SERVER] " << server_type << " server stopped";
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling http_server->stop() from a different thread
         if (shutdown_event->peek()) {
+          BOOST_LOG(info) << "[SERVER] " << server_type << " server shutdown requested";
           return;
         }
 
-        BOOST_LOG(fatal) << "Couldn't start http server on ports ["sv << port_https << ", "sv << port_https << "]: "sv << err.what();
+        BOOST_LOG(fatal) << "[SERVER] Couldn't start " << server_type << " server on ports [" << port_http << ", " << port_https << "]: " << err.what();
         shutdown_event->raise(true);
         return;
       }
     };
-    std::thread ssl {accept_and_run, &https_server};
-    std::thread tcp {accept_and_run, &http_server};
+    
+    BOOST_LOG(info) << "[SERVER] Creating server threads...";
+    std::thread ssl {accept_and_run, &https_server, "HTTPS"};
+    std::thread tcp {accept_and_run, &http_server, "HTTP"};
+
+    BOOST_LOG(info) << "[SERVER] NVHTTP server is ready and listening for connections";
+    BOOST_LOG(info) << "[SERVER] HTTP endpoint: http://localhost:" << port_http;
+    BOOST_LOG(info) << "[SERVER] HTTPS endpoint: https://localhost:" << port_https;
+    
+    if (enable_userpass_auth) {
+      BOOST_LOG(info) << "[SERVER] Authentication: User-pass mode (SSL cert verification bypassed)";
+    } else {
+      BOOST_LOG(info) << "[SERVER] Authentication: SSL certificate mode";
+    }
 
     // Wait for any event
+    BOOST_LOG(info) << "[SERVER] Waiting for shutdown signal...";
     shutdown_event->view();
 
+    BOOST_LOG(info) << "[SERVER] Shutdown signal received, stopping servers...";
     https_server.stop();
     http_server.stop();
 
+    BOOST_LOG(info) << "[SERVER] Waiting for server threads to finish...";
     ssl.join();
     tcp.join();
+    
+    BOOST_LOG(info) << "[SERVER] NVHTTP server stopped successfully";
   }
 
   void erase_all_clients() {

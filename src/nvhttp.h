@@ -59,6 +59,14 @@ namespace nvhttp {
    */
   void setup(const std::string &pkey, const std::string &cert);
 
+  /**
+   * @brief Enable or disable user-pass authentication mode.
+   * When enabled, SSL certificate verification is bypassed and 
+   * username/password authentication is used instead.
+   * @param enabled true to enable user-pass auth, false to disable
+   */
+  void enable_user_pass_auth(bool enabled);
+
   class SunshineHTTPS: public SimpleWeb::HTTPS {
   public:
     SunshineHTTPS(boost::asio::io_context &io_context, boost::asio::ssl::context &ctx):

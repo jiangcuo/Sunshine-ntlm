@@ -389,6 +389,10 @@ int main(int argc, char *argv[]) {
     return lifetime::desired_exit_code;
   }
 
+  // 临时启用用户名密码认证模式进行测试
+  BOOST_LOG(info) << "Enabling user-pass authentication mode for testing";
+  nvhttp::enable_user_pass_auth(true);
+
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
