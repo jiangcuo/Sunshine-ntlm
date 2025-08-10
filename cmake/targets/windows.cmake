@@ -10,4 +10,8 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         # WMI libraries for board UUID functionality
         wbemuuid.lib
         ole32.lib
-        oleaut32.lib)
+        oleaut32.lib
+        # Additional libraries for WMI functionality
+        kernel32.lib
+        user32.lib
+        advapi32.lib)

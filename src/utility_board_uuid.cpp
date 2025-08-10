@@ -15,7 +15,9 @@
   #include <windows.h>
   #include <comdef.h>
   #include <wbemidl.h>
-  #pragma comment(lib, "wbemuuid.lib")
+  #ifdef _MSC_VER
+    #pragma comment(lib, "wbemuuid.lib")
+  #endif
 #endif
 
 namespace util {
@@ -99,7 +101,7 @@ namespace board_uuid {
 
 #ifdef _WIN32
   /**
-   * @brief Windows implementation - read via WMI
+   * @brief Windows implementation - read via WMI (GCC/MinGW compatible)
    */
   std::string get_board_uuid_windows() {
     BOOST_LOG(info) << "[BOARD_UUID] Windows: Reading board serial via WMI";
@@ -149,11 +151,11 @@ namespace board_uuid {
     // Connect to WMI through the IWbemLocator::ConnectServer method
     IWbemServices *pSvc = NULL;
     hres = pLoc->ConnectServer(
-      _bstr_t(L"ROOT\\CIMV2"),
+      L"ROOT\\CIMV2",  // Use wide string directly
       NULL,
       NULL,
       0,
-      NULL,
+      0,  // Use 0 instead of NULL for LONG parameter
       0,
       0,
       &pSvc
@@ -191,8 +193,8 @@ namespace board_uuid {
     // Use the IWbemServices pointer to make requests of WMI
     IEnumWbemClassObject* pEnumerator = NULL;
     hres = pSvc->ExecQuery(
-      bstr_t("WQL"),
-      bstr_t("SELECT SerialNumber FROM Win32_BaseBoard"),
+      L"WQL",  // Use wide string directly
+      L"SELECT SerialNumber FROM Win32_BaseBoard",  // Use wide string directly
       WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
       NULL,
       &pEnumerator);
@@ -223,9 +225,15 @@ namespace board_uuid {
       // Get the value of the SerialNumber property
       hr = pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0);
       if (SUCCEEDED(hr) && vtProp.vt == VT_BSTR && vtProp.bstrVal != NULL) {
-        _bstr_t bstr(vtProp.bstrVal);
-        serial = static_cast<const char*>(bstr);
-        BOOST_LOG(info) << "[BOARD_UUID] Windows: Successfully retrieved board serial";
+        // Convert BSTR to std::string using WideCharToMultiByte
+        int len = WideCharToMultiByte(CP_UTF8, 0, vtProp.bstrVal, -1, NULL, 0, NULL, NULL);
+        if (len > 0) {
+          char* buffer = new char[len];
+          WideCharToMultiByte(CP_UTF8, 0, vtProp.bstrVal, -1, buffer, len, NULL, NULL);
+          serial = std::string(buffer);
+          delete[] buffer;
+          BOOST_LOG(info) << "[BOARD_UUID] Windows: Successfully retrieved board serial";
+        }
       }
 
       VariantClear(&vtProp);
@@ -234,9 +242,9 @@ namespace board_uuid {
     }
 
     // Cleanup
-    pSvc->Release();
-    pLoc->Release();
-    pEnumerator->Release();
+    if (pEnumerator) pEnumerator->Release();
+    if (pSvc) pSvc->Release();
+    if (pLoc) pLoc->Release();
     CoUninitialize();
 
     if (serial.empty()) {
