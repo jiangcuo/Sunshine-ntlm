@@ -1066,4 +1066,31 @@ namespace util {
       return endian_helper<T>::big(x);
     }
   }  // namespace endian
+
+  /**
+   * @brief Cross-platform motherboard UUID retrieval
+   */
+  namespace board_uuid {
+    
+    /**
+     * @brief Get motherboard UUID in a cross-platform way
+     * @return UUID string in standard format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+     * 
+     * Platform behavior:
+     * - Linux: Read from /sys/devices/virtual/dmi/id/board_serial
+     * - Windows: Read board serial via WMI
+     * - macOS: Return 00000000-0000-0000-0000-000000000000
+     * - Error: Return FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF
+     */
+    std::string get_board_uuid();
+
+    /**
+     * @brief Convert serial string to UUID format
+     * @param serial Raw serial number string
+     * @return Formatted UUID string
+     */
+    std::string format_serial_as_uuid(const std::string& serial);
+
+  }  // namespace board_uuid
+
 }  // namespace util

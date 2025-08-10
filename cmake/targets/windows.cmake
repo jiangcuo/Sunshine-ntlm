@@ -6,4 +6,8 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         $<TARGET_OBJECTS:sunshine_rc_object>
         Windowsapp.lib
         Wtsapi32.lib
-        version.lib)
+        version.lib
+        # WMI libraries for board UUID functionality
+        wbemuuid.lib
+        ole32.lib
+        oleaut32.lib)

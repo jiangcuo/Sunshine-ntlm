@@ -389,9 +389,10 @@ int main(int argc, char *argv[]) {
     return lifetime::desired_exit_code;
   }
 
-  // 临时启用用户名密码认证模式进行测试
-  BOOST_LOG(info) << "Enabling user-pass authentication mode for testing";
-  nvhttp::enable_user_pass_auth(true);
+  // 测试主板UUID获取功能
+  BOOST_LOG(info) << "Testing board UUID functionality...";
+  auto board_uuid = util::board_uuid::get_board_uuid();
+  BOOST_LOG(info) << "Board UUID: " << board_uuid;
 
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};

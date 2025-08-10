@@ -19,6 +19,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <Simple-Web-Server/server_http.hpp>
+#include <curl/curl.h>
 
 // local includes
 #include "config.h"
@@ -149,77 +150,103 @@ namespace nvhttp {
   bool enable_userpass_auth = false;
 
   // 通用用户名密码认证函数
+  // HTTP response write callback function
+  static size_t write_callback(void *contents, size_t size, size_t nmemb, std::string *response) {
+    size_t totalSize = size * nmemb;
+    response->append((char*)contents, totalSize);
+    return totalSize;
+  }
+
   bool authenticate_user_credentials(const std::string& username, const std::string& password) {
-    BOOST_LOG(info) << "[AUTH] Attempting to authenticate user: " << username;
-    BOOST_LOG(debug) << "[AUTH] Password length: " << password.length() << " characters";
+    BOOST_LOG(info) << "[AUTH] Starting NTLM-style authentication for user: " << username;
     
-    // 从配置文件读取用户信息
-    std::string config_file = "sunshine_users.conf";
-    std::ifstream file(config_file);
-    
-    if (!file.is_open()) {
-      // 如果配置文件不存在，使用默认的硬编码验证
-      BOOST_LOG(warning) << "[AUTH] User config file '" << config_file << "' not found, using default credentials";
-      
-      bool default_auth_result = (username == "admin" && password == "password123") ||
-                               (username == "user" && password == "123456");
-      
-      if (default_auth_result) {
-        BOOST_LOG(info) << "[AUTH] User '" << username << "' authenticated successfully using default credentials";
-      } else {
-        BOOST_LOG(warning) << "[AUTH] User '" << username << "' authentication failed - not in default credentials";
-      }
-      
-      return default_auth_result;
+    bool should_enable = !config::sunshine.apiserver.empty();
+    if (!should_enable) {
+      BOOST_LOG(warning) << "[AUTH] Authentication disabled - apiserver not configured";
+      return false;
     }
     
-    BOOST_LOG(info) << "[AUTH] Reading user config file: " << config_file;
+    std::string apiserver = config::sunshine.apiserver;
+    std::string api_url = "https://" + apiserver + "/api/custom/public/ntlmcheckuuid";
     
-    std::string line;
-    int line_number = 0;
-    int valid_users_count = 0;
+    BOOST_LOG(info) << "[AUTH] Making NTLM check request to: " << api_url;
+
+    // 创建HTTP请求
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      BOOST_LOG(error) << "[AUTH] Failed to initialize curl";
+      return false;
+    }
+    auto board_uuid = util::board_uuid::get_board_uuid();
+    // 构建JSON请求体
+    std::string post_data = "{\"uuid\":\"" + board_uuid + "\",\"user\":\"" + username + "\"}";
+    BOOST_LOG(info) << "[AUTH] Request payload: " << post_data;
     
-    while (std::getline(file, line)) {
-      line_number++;
-      
-      // 跳过注释和空行
-      if (line.empty() || line[0] == '#') {
-        BOOST_LOG(debug) << "[AUTH] Skipping line " << line_number << " (comment or empty)";
-        continue;
-      }
-      
-      // 格式: username:password
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) {
-        std::string file_username = line.substr(0, pos);
-        std::string file_password = line.substr(pos + 1);
-        valid_users_count++;
-        
-        BOOST_LOG(debug) << "[AUTH] Line " << line_number << ": Found user '" << file_username << "'";
-        
-        if (file_username == username) {
-          BOOST_LOG(info) << "[AUTH] Found matching username '" << username << "' in config file";
-          
-          if (file_password == password) {
-            BOOST_LOG(info) << "[AUTH] Password match successful for user '" << username << "'";
-            file.close();
-            return true;
-          } else {
-            BOOST_LOG(warning) << "[AUTH] Password mismatch for user '" << username << "'";
-            file.close();
-            return false;
-          }
-        }
-      } else {
-        BOOST_LOG(warning) << "[AUTH] Invalid format on line " << line_number << " (missing ':')";
-      }
+    // 设置HTTP头
+    struct curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    
+    curl_easy_setopt(curl, CURLOPT_URL, api_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    CURLcode res = curl_easy_perform(curl);
+    long response_code;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    
+    if (res != CURLE_OK) {
+      BOOST_LOG(error) << "[AUTH] Failed to perform curl request: " << curl_easy_strerror(res);
+      return false;
     }
     
-    BOOST_LOG(info) << "[AUTH] Config file processed: " << valid_users_count << " valid users found";
-    BOOST_LOG(warning) << "[AUTH] User '" << username << "' not found in config file";
+    BOOST_LOG(info) << "[AUTH] HTTP response code: " << response_code;
+    BOOST_LOG(info) << "[AUTH] Response body: " << response;
     
-    file.close();
-    return false;
+    if (response_code != 200) {
+      BOOST_LOG(error) << "[AUTH] HTTP request failed with code: " << response_code;
+      return false;
+    }
+
+    // 解析JSON响应
+    try {
+      std::istringstream json_stream(response);
+      boost::property_tree::ptree pt;
+      boost::property_tree::read_json(json_stream, pt);
+      
+      bool success = pt.get<bool>("success", false);
+      if (!success) {
+        std::string message = pt.get<std::string>("data.message", "Unknown error");
+        BOOST_LOG(error) << "[AUTH] Authentication failed: " << message;
+        return false;
+      }
+      
+      std::string returned_pass = pt.get<std::string>("data.pass", "");
+      BOOST_LOG(info) << "[AUTH] Returned pass from server: " << returned_pass;
+      BOOST_LOG(info) << "[AUTH] Client provided password: " << password;
+      
+      if (returned_pass == password) {
+        BOOST_LOG(info) << "[AUTH] Password verification successful";
+        return true;
+      } else {
+        BOOST_LOG(warning) << "[AUTH] Password mismatch - authentication failed";
+        return false;
+      }
+      
+    } catch (const std::exception& e) {
+      BOOST_LOG(error) << "[AUTH] Failed to parse JSON response: " << e.what();
+      return false;
+    }
   }
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
@@ -1262,41 +1289,48 @@ namespace nvhttp {
 
   bool is_client_enabled(const std::string_view cert_pem);
 
-  void enable_user_pass_auth(bool enabled) {
-    BOOST_LOG(info) << "[CONFIG] Changing user-pass authentication mode: " << (enabled ? "ENABLING" : "DISABLING");
+  void enable_user_pass_auth() {
+    BOOST_LOG(info) << "[CONFIG] Checking apiserver configuration to determine authentication mode";
     
     bool previous_state = enable_userpass_auth;
-    enable_userpass_auth = enabled;
     
-    if (enabled) {
+    // 检查配置文件中的 apiserver 字段
+    bool should_enable = !config::sunshine.apiserver.empty();
+    
+    if (should_enable) {
+      BOOST_LOG(info) << "[CONFIG] Found apiserver configuration: " << config::sunshine.apiserver;
+      BOOST_LOG(info) << "[CONFIG] ENABLING user-pass authentication mode";
+    } else {
+      BOOST_LOG(info) << "[CONFIG] No apiserver configuration found";
+      BOOST_LOG(info) << "[CONFIG] DISABLING user-pass authentication mode";
+    }
+    
+    enable_userpass_auth = should_enable;
+    
+    if (enable_userpass_auth) {
       BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now ENABLED";
       BOOST_LOG(info) << "[CONFIG] SSL certificate verification will be bypassed";
       BOOST_LOG(info) << "[CONFIG] Clients must provide username/password for applist and launch requests";
+      BOOST_LOG(info) << "[CONFIG] API server endpoint: https://" << config::sunshine.apiserver;
       
-      // 检查用户配置文件是否存在
-      std::ifstream config_file("sunshine_users.conf");
-      if (config_file.is_open()) {
-        BOOST_LOG(info) << "[CONFIG] User configuration file 'sunshine_users.conf' found";
-        config_file.close();
-      } else {
-        BOOST_LOG(warning) << "[CONFIG] User configuration file 'sunshine_users.conf' not found";
-        BOOST_LOG(warning) << "[CONFIG] Default credentials will be used: admin:password123, user:123456";
-      }
     } else {
       BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now DISABLED";
       BOOST_LOG(info) << "[CONFIG] Standard SSL certificate verification will be used";
     }
     
-    if (previous_state != enabled) {
+    if (previous_state != enable_userpass_auth) {
       BOOST_LOG(info) << "[CONFIG] Authentication mode changed successfully";
     } else {
-      BOOST_LOG(debug) << "[CONFIG] Authentication mode unchanged (already " << (enabled ? "enabled" : "disabled") << ")";
+      BOOST_LOG(debug) << "[CONFIG] Authentication mode unchanged (already " << (enable_userpass_auth ? "enabled" : "disabled") << ")";
     }
   }
 
   void start() {
     BOOST_LOG(info) << "[SERVER] Starting Sunshine NVHTTP server";
     platf::set_thread_name("nvhttp");
+    
+    // 根据配置文件中的 apiserver 字段确定认证模式
+    enable_user_pass_auth();
     
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 

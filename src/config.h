@@ -270,6 +270,7 @@ namespace config {
     std::string log_file;
     bool notify_pre_releases;
     bool system_tray;
+    std::string apiserver;
     std::vector<prep_cmd_t> prep_cmds;
 
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")
