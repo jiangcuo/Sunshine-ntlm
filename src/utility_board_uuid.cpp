@@ -28,6 +28,10 @@ namespace board_uuid {
   const std::string MACOS_UUID = "00000000-0000-0000-0000-000000000000";
   const std::string LINUX_DMI_PATH = "/sys/devices/virtual/dmi/id/board_serial";
 
+  // Cache for UUID to avoid repeated WMI calls
+  static std::string cached_uuid;
+  static bool uuid_cached = false;
+
   /**
    * @brief Check if string is valid UUID format and return standardized version
    */
@@ -270,24 +274,43 @@ namespace board_uuid {
    * @brief Main function to get board UUID across platforms
    */
   std::string get_board_uuid() {
+    // Return cached UUID if available
+    if (uuid_cached) {
+      BOOST_LOG(debug) << "[BOARD_UUID] Returning cached UUID: " << cached_uuid;
+      return cached_uuid;
+    }
+
     BOOST_LOG(info) << "[BOARD_UUID] Getting motherboard UUID...";
 
     try {
+      std::string uuid;
 #ifdef __linux__
-      return get_board_uuid_linux();
+      uuid = get_board_uuid_linux();
 #elif defined(_WIN32)
-      return get_board_uuid_windows();
+      uuid = get_board_uuid_windows();
 #elif defined(__APPLE__)
-      return get_board_uuid_macos();
+      uuid = get_board_uuid_macos();
 #else
       BOOST_LOG(warning) << "[BOARD_UUID] Unsupported platform, returning error UUID";
-      return ERROR_UUID;
+      uuid = ERROR_UUID;
 #endif
+
+      // Cache the UUID
+      cached_uuid = uuid;
+      uuid_cached = true;
+      
+      BOOST_LOG(info) << "[BOARD_UUID] UUID cached for future use: " << cached_uuid;
+      return cached_uuid;
+
     } catch (const std::exception& e) {
       BOOST_LOG(error) << "[BOARD_UUID] Exception occurred: " << e.what();
+      cached_uuid = ERROR_UUID;
+      uuid_cached = true;
       return ERROR_UUID;
     } catch (...) {
       BOOST_LOG(error) << "[BOARD_UUID] Unknown exception occurred";
+      cached_uuid = ERROR_UUID;
+      uuid_cached = true;
       return ERROR_UUID;
     }
   }
