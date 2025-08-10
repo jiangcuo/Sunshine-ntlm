@@ -151,7 +151,7 @@ namespace board_uuid {
     // Connect to WMI through the IWbemLocator::ConnectServer method
     IWbemServices *pSvc = NULL;
     hres = pLoc->ConnectServer(
-      L"ROOT\\CIMV2",  // Use wide string directly
+      (BSTR)L"ROOT\\CIMV2",  // Cast to BSTR
       NULL,
       NULL,
       0,
@@ -193,8 +193,8 @@ namespace board_uuid {
     // Use the IWbemServices pointer to make requests of WMI
     IEnumWbemClassObject* pEnumerator = NULL;
     hres = pSvc->ExecQuery(
-      L"WQL",  // Use wide string directly
-      L"SELECT SerialNumber FROM Win32_BaseBoard",  // Use wide string directly
+      (BSTR)L"WQL",  // Cast to BSTR
+      (BSTR)L"SELECT SerialNumber FROM Win32_BaseBoard",  // Cast to BSTR
       WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
       NULL,
       &pEnumerator);
