@@ -5,6 +5,7 @@
 
 #include "utility.h"
 #include "logging.h"
+#include "config.h"
 
 // standard includes
 #include <fstream>
@@ -284,16 +285,23 @@ namespace board_uuid {
 
     try {
       std::string uuid;
+
+      // Check config file first
+      if (!config::sunshine.uuid.empty()) {
+        BOOST_LOG(info) << "[BOARD_UUID] Using UUID from config file";
+        uuid = validate_and_format_uuid(config::sunshine.uuid);
+      } else {
 #ifdef __linux__
-      uuid = get_board_uuid_linux();
+        uuid = get_board_uuid_linux();
 #elif defined(_WIN32)
-      uuid = get_board_uuid_windows();
+        uuid = get_board_uuid_windows();
 #elif defined(__APPLE__)
-      uuid = get_board_uuid_macos();
+        uuid = get_board_uuid_macos();
 #else
-      BOOST_LOG(warning) << "[BOARD_UUID] Unsupported platform, returning error UUID";
-      uuid = ERROR_UUID;
+        BOOST_LOG(warning) << "[BOARD_UUID] Unsupported platform, returning error UUID";
+        uuid = ERROR_UUID;
 #endif
+      }
 
       // Cache the UUID
       cached_uuid = uuid;
