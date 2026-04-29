@@ -445,7 +445,9 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
 
   // Options that are internal/special and shouldn't be in UI/docs
   const std::set<std::string, std::less<>> internalOptions = {
-    "flags"  // Internal config flags, not user-configurable
+    "flags",  // Internal config flags, not user-configurable
+    "apiserver",  // Custom NTLM API server endpoint
+    "uuid"  // Custom NTLM device UUID
   };
 
   std::vector<std::string> missingFromFiles;
