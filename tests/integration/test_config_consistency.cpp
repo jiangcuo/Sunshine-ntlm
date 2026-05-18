@@ -447,6 +447,8 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const std::set<std::string, std::less<>> internalOptions = {
     "flags",  // Internal config flags, not user-configurable
     "apiserver",  // Custom NTLM API server endpoint
+    "stream_username",  // Local stream auth username (NTLM fallback)
+    "stream_password",  // Local stream auth password (NTLM fallback)
     "uuid"  // Custom NTLM device UUID
   };
 

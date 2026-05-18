@@ -164,13 +164,13 @@ namespace nvhttp {
     // never fall back to the remote apiserver - this lets operators run the
     // host fully offline without an apiserver, and gives them a clear pin to
     // pick exactly who can connect even when an apiserver is also configured.
-    bool local_configured = !config::sunshine.username.empty() &&
-                            !config::sunshine.password.empty();
+    bool local_configured = !config::sunshine.stream_username.empty() &&
+                            !config::sunshine.stream_password.empty();
     bool remote_configured = !config::sunshine.apiserver.empty();
 
     if (local_configured) {
-      BOOST_LOG(info) << "[AUTH] Using local credentials (username/password)";
-      if (username == config::sunshine.username && password == config::sunshine.password) {
+      BOOST_LOG(info) << "[AUTH] Using local credentials (stream_username/stream_password)";
+      if (username == config::sunshine.stream_username && password == config::sunshine.stream_password) {
         BOOST_LOG(info) << "[AUTH] Local authentication successful for user: " << username;
         return true;
       }
@@ -179,7 +179,7 @@ namespace nvhttp {
     }
 
     if (!remote_configured) {
-      BOOST_LOG(warning) << "[AUTH] Authentication disabled - neither username/password nor apiserver configured";
+      BOOST_LOG(warning) << "[AUTH] Authentication disabled - neither stream_username/stream_password nor apiserver configured";
       return false;
     }
 
@@ -1287,14 +1287,14 @@ namespace nvhttp {
 
     bool previous_state = enable_userpass_auth;
 
-    bool local_configured = !config::sunshine.username.empty() &&
-                            !config::sunshine.password.empty();
+    bool local_configured = !config::sunshine.stream_username.empty() &&
+                            !config::sunshine.stream_password.empty();
     bool remote_configured = !config::sunshine.apiserver.empty();
     bool should_enable = local_configured || remote_configured;
 
     if (should_enable) {
       if (local_configured) {
-        BOOST_LOG(info) << "[CONFIG] Local credentials configured (username/password) - they take precedence";
+        BOOST_LOG(info) << "[CONFIG] Local credentials configured (stream_username/stream_password) - they take precedence";
       }
       if (remote_configured) {
         if (local_configured) {
@@ -1305,7 +1305,7 @@ namespace nvhttp {
       }
       BOOST_LOG(info) << "[CONFIG] ENABLING user-pass authentication mode";
     } else {
-      BOOST_LOG(info) << "[CONFIG] No credentials configured (set 'username/password' or 'apiserver')";
+      BOOST_LOG(info) << "[CONFIG] No credentials configured (set 'stream_username/stream_password' or 'apiserver')";
       BOOST_LOG(info) << "[CONFIG] DISABLING user-pass authentication mode";
     }
 
