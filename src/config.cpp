@@ -1317,6 +1317,8 @@ namespace config {
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "system_tray", sunshine.system_tray);
     string_f(vars, "apiserver", sunshine.apiserver);
+    string_f(vars, "username", sunshine.username);
+    string_f(vars, "password", sunshine.password);
     string_f(vars, "uuid", sunshine.uuid);
 
     int port = sunshine.port;

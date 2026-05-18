@@ -271,6 +271,8 @@ namespace config {
     bool notify_pre_releases;
     bool system_tray;
     std::string apiserver;
+    std::string username;
+    std::string password;
     std::string uuid;
     std::vector<prep_cmd_t> prep_cmds;
 

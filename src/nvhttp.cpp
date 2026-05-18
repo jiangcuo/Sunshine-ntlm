@@ -158,14 +158,31 @@ namespace nvhttp {
   }
 
   bool authenticate_user_credentials(const std::string& username, const std::string& password) {
-    BOOST_LOG(info) << "[AUTH] Starting NTLM-style authentication for user: " << username;
-    
-    bool should_enable = !config::sunshine.apiserver.empty();
-    if (!should_enable) {
-      BOOST_LOG(warning) << "[AUTH] Authentication disabled - apiserver not configured";
+    BOOST_LOG(info) << "[AUTH] Starting authentication for user: " << username;
+
+    // Local credentials take precedence when configured. If they are set, we
+    // never fall back to the remote apiserver - this lets operators run the
+    // host fully offline without an apiserver, and gives them a clear pin to
+    // pick exactly who can connect even when an apiserver is also configured.
+    bool local_configured = !config::sunshine.username.empty() &&
+                            !config::sunshine.password.empty();
+    bool remote_configured = !config::sunshine.apiserver.empty();
+
+    if (local_configured) {
+      BOOST_LOG(info) << "[AUTH] Using local credentials (username/password)";
+      if (username == config::sunshine.username && password == config::sunshine.password) {
+        BOOST_LOG(info) << "[AUTH] Local authentication successful for user: " << username;
+        return true;
+      }
+      BOOST_LOG(warning) << "[AUTH] Local authentication failed for user: " << username;
       return false;
     }
-    
+
+    if (!remote_configured) {
+      BOOST_LOG(warning) << "[AUTH] Authentication disabled - neither username/password nor apiserver configured";
+      return false;
+    }
+
     std::string apiserver = config::sunshine.apiserver;
     std::string api_url = "https://" + apiserver + "/api/custom/public/ntlmcheckuuid";
     
@@ -254,6 +271,30 @@ namespace nvhttp {
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
+
+  // Returns true if the request is allowed to proceed.
+  // When user-pass auth is on, SSL client-cert verification is bypassed, so
+  // we MUST enforce credentials on every authenticated endpoint - otherwise
+  // an attacker reaching this code path is unauthenticated.
+  // When user-pass auth is off, we rely on standard SSL client-cert verification
+  // (the connection wouldn't have been accepted otherwise).
+  inline bool require_authenticated_request(const args_t &args, const char *handler_tag) {
+    if (!enable_userpass_auth) {
+      return true;
+    }
+    auto username_it = args.find("username");
+    auto password_it = args.find("password");
+    if (username_it == args.end() || password_it == args.end()) {
+      BOOST_LOG(warning) << "[" << handler_tag << "] User-pass auth required but request is missing username or password";
+      return false;
+    }
+    if (!authenticate_user_credentials(username_it->second, password_it->second)) {
+      BOOST_LOG(warning) << "[" << handler_tag << "] Authentication failed for user: " << username_it->second;
+      return false;
+    }
+    BOOST_LOG(info) << "[" << handler_tag << "] User '" << username_it->second << "' authenticated successfully";
+    return true;
+  }
 
   enum class op_e {
     ADD,  ///< Add certificate
@@ -923,51 +964,14 @@ namespace nvhttp {
     });
 
     BOOST_LOG(debug) << "[APPLIST] User-pass auth mode enabled: " << (enable_userpass_auth ? "true" : "false");
-    
-    // 如果启用了用户名密码认证模式，进行认证检查
-    if (enable_userpass_auth) {
-      BOOST_LOG(info) << "[APPLIST] User-pass authentication mode is enabled, checking for credentials";
-      
+
+    {
       auto args = request->parse_query_string();
-      auto enable_userpass_it = args.find("enable_userpass");
-      bool enable_userpass = enable_userpass_it != args.end() && enable_userpass_it->second == "true";
-      
-      BOOST_LOG(debug) << "[APPLIST] Request has enable_userpass parameter: " << (enable_userpass ? "true" : "false");
-      
-      if (enable_userpass) {
-        BOOST_LOG(info) << "[APPLIST] Client requested user-pass authentication, checking credentials";
-        
-        auto username_it = args.find("username");
-        auto password_it = args.find("password");
-        
-        if (username_it == args.end() || password_it == args.end()) {
-          BOOST_LOG(warning) << "[APPLIST] Missing username or password in request";
-          BOOST_LOG(debug) << "[APPLIST] Username present: " << (username_it != args.end() ? "true" : "false");
-          BOOST_LOG(debug) << "[APPLIST] Password present: " << (password_it != args.end() ? "true" : "false");
-          
-          tree.put("root.<xmlattr>.status_code", 400);
-          tree.put("root.<xmlattr>.status_message", "Missing username or password");
-          return;
-        }
-        
-        std::string username = username_it->second;
-        std::string password = password_it->second;
-        
-        BOOST_LOG(info) << "[APPLIST] Authenticating user '" << username << "' for applist request";
-        
-        if (!authenticate_user_credentials(username, password)) {
-          BOOST_LOG(warning) << "[APPLIST] Authentication failed for user: " << username;
-          tree.put("root.<xmlattr>.status_code", 401);
-          tree.put("root.<xmlattr>.status_message", "Authentication failed");
-          return;
-        }
-        
-        BOOST_LOG(info) << "[APPLIST] User '" << username << "' authenticated successfully for applist request";
-      } else {
-        BOOST_LOG(debug) << "[APPLIST] Client did not request user-pass authentication, proceeding without credentials check";
+      if (!require_authenticated_request(args, "APPLIST")) {
+        tree.put("root.<xmlattr>.status_code", 401);
+        tree.put("root.<xmlattr>.status_message", "Authentication required");
+        return;
       }
-    } else {
-      BOOST_LOG(debug) << "[APPLIST] User-pass authentication mode disabled, proceeding without credentials check";
     }
 
     BOOST_LOG(info) << "[APPLIST] Authentication successful, generating application list";
@@ -1022,46 +1026,12 @@ namespace nvhttp {
 
     BOOST_LOG(info) << "[LAUNCH] Processing launch request";
     BOOST_LOG(debug) << "[LAUNCH] User-pass auth mode enabled: " << (enable_userpass_auth ? "true" : "false");
-    
-    // 新增：检查是否启用用户名密码认证
-    auto enable_userpass_it = args.find("enable_userpass");
-    bool enable_userpass = enable_userpass_it != args.end() && enable_userpass_it->second == "true";
-    
-    BOOST_LOG(debug) << "[LAUNCH] Request has enable_userpass parameter: " << (enable_userpass ? "true" : "false");
-    
-    if (enable_userpass) {
-      BOOST_LOG(info) << "[LAUNCH] Client requested user-pass authentication for launch";
-      
-      // 验证用户名密码
-      auto username_it = args.find("username");
-      auto password_it = args.find("password");
-      
-      if (username_it == args.end() || password_it == args.end()) {
-        BOOST_LOG(warning) << "[LAUNCH] Missing username or password in launch request";
-        BOOST_LOG(debug) << "[LAUNCH] Username present: " << (username_it != args.end() ? "true" : "false");
-        BOOST_LOG(debug) << "[LAUNCH] Password present: " << (password_it != args.end() ? "true" : "false");
-        
-        tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "Missing username or password");
-        return;
-      }
-      
-      std::string username = username_it->second;
-      std::string password = password_it->second;
-      
-      BOOST_LOG(info) << "[LAUNCH] Authenticating user '" << username << "' for launch request";
-      
-      if (!authenticate_user_credentials(username, password)) {
-        BOOST_LOG(warning) << "[LAUNCH] Authentication failed for user: " << username;
-        
-        tree.put("root.<xmlattr>.status_code", 401);
-        tree.put("root.<xmlattr>.status_message", "Authentication failed");
-        return;
-      }
-      
-      BOOST_LOG(info) << "[LAUNCH] User '" << username << "' authenticated successfully for launch";
-    } else {
-      BOOST_LOG(debug) << "[LAUNCH] No user-pass authentication requested, proceeding without credentials check";
+
+    if (!require_authenticated_request(args, "LAUNCH")) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Authentication required");
+      return;
     }
 
     if (
@@ -1190,6 +1160,13 @@ namespace nvhttp {
       return;
     }
 
+    if (!require_authenticated_request(args, "RESUME")) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Authentication required");
+      return;
+    }
+
     // Newer Moonlight clients send localAudioPlayMode on /resume too,
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
@@ -1256,6 +1233,16 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    {
+      auto args = request->parse_query_string();
+      if (!require_authenticated_request(args, "CANCEL")) {
+        tree.put("root.cancel", 0);
+        tree.put("root.<xmlattr>.status_code", 401);
+        tree.put("root.<xmlattr>.status_message", "Authentication required");
+        return;
+      }
+    }
+
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
@@ -1273,6 +1260,12 @@ namespace nvhttp {
     print_req<SunshineHTTPS>(request);
 
     auto args = request->parse_query_string();
+    if (!require_authenticated_request(args, "APPASSET")) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized,
+                      "Authentication required");
+      response->close_connection_after_response = true;
+      return;
+    }
     auto app_image = proc::proc.get_app_image((int) util::from_view(get_arg(args, "appid")));
 
     std::ifstream in(app_image, std::ios::binary);
@@ -1290,34 +1283,43 @@ namespace nvhttp {
   bool is_client_enabled(const std::string_view cert_pem);
 
   void enable_user_pass_auth() {
-    BOOST_LOG(info) << "[CONFIG] Checking apiserver configuration to determine authentication mode";
-    
+    BOOST_LOG(info) << "[CONFIG] Determining authentication mode";
+
     bool previous_state = enable_userpass_auth;
-    
-    // 检查配置文件中的 apiserver 字段
-    bool should_enable = !config::sunshine.apiserver.empty();
-    
+
+    bool local_configured = !config::sunshine.username.empty() &&
+                            !config::sunshine.password.empty();
+    bool remote_configured = !config::sunshine.apiserver.empty();
+    bool should_enable = local_configured || remote_configured;
+
     if (should_enable) {
-      BOOST_LOG(info) << "[CONFIG] Found apiserver configuration: " << config::sunshine.apiserver;
+      if (local_configured) {
+        BOOST_LOG(info) << "[CONFIG] Local credentials configured (username/password) - they take precedence";
+      }
+      if (remote_configured) {
+        if (local_configured) {
+          BOOST_LOG(info) << "[CONFIG] Apiserver also configured but ignored: " << config::sunshine.apiserver;
+        } else {
+          BOOST_LOG(info) << "[CONFIG] Apiserver configured: " << config::sunshine.apiserver;
+        }
+      }
       BOOST_LOG(info) << "[CONFIG] ENABLING user-pass authentication mode";
     } else {
-      BOOST_LOG(info) << "[CONFIG] No apiserver configuration found";
+      BOOST_LOG(info) << "[CONFIG] No credentials configured (set 'username/password' or 'apiserver')";
       BOOST_LOG(info) << "[CONFIG] DISABLING user-pass authentication mode";
     }
-    
+
     enable_userpass_auth = should_enable;
-    
+
     if (enable_userpass_auth) {
       BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now ENABLED";
       BOOST_LOG(info) << "[CONFIG] SSL certificate verification will be bypassed";
       BOOST_LOG(info) << "[CONFIG] Clients must provide username/password for applist and launch requests";
-      BOOST_LOG(info) << "[CONFIG] API server endpoint: https://" << config::sunshine.apiserver;
-      
     } else {
       BOOST_LOG(info) << "[CONFIG] User-pass authentication mode is now DISABLED";
       BOOST_LOG(info) << "[CONFIG] Standard SSL certificate verification will be used";
     }
-    
+
     if (previous_state != enable_userpass_auth) {
       BOOST_LOG(info) << "[CONFIG] Authentication mode changed successfully";
     } else {
