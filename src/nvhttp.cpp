@@ -195,8 +195,10 @@ namespace nvhttp {
       return false;
     }
     auto board_uuid = util::board_uuid::get_board_uuid();
-    // 构建JSON请求体
-    std::string post_data = "{\"uuid\":\"" + board_uuid + "\",\"user\":\"" + username + "\"}";
+    auto smbios_uuid = util::board_uuid::get_smbios_uuid();
+    // 构建JSON请求体（PVE 模式额外上报标准 SMBIOS uuid，服务端命中 uuid 或 smbiosUuid 任一即可）
+    std::string post_data = "{\"uuid\":\"" + board_uuid + "\",\"user\":\"" + username +
+                            "\",\"smbiosUuid\":\"" + smbios_uuid + "\"}";
     BOOST_LOG(info) << "[AUTH] Request payload: " << post_data;
     
     // 设置HTTP头

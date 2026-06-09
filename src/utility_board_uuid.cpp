@@ -271,6 +271,187 @@ namespace board_uuid {
   }
 #endif
 
+  // ===== Standard SMBIOS System UUID (PVE mode) =====
+
+  const std::string LINUX_PRODUCT_UUID_PATH = "/sys/devices/virtual/dmi/id/product_uuid";
+
+  // Cache for SMBIOS UUID to avoid repeated WMI/file reads
+  static std::string cached_smbios_uuid;
+  static bool smbios_uuid_cached = false;
+
+#ifdef __linux__
+  /**
+   * @brief Linux implementation - read standard SMBIOS system UUID from DMI product_uuid
+   */
+  std::string get_smbios_uuid_linux() {
+    BOOST_LOG(info) << "[SMBIOS_UUID] Linux: Reading product UUID from " << LINUX_PRODUCT_UUID_PATH;
+
+    std::ifstream file(LINUX_PRODUCT_UUID_PATH);
+    if (!file.is_open()) {
+      BOOST_LOG(warning) << "[SMBIOS_UUID] Linux: Failed to open product_uuid (root required?): " << LINUX_PRODUCT_UUID_PATH;
+      return ERROR_UUID;
+    }
+
+    std::string uuid;
+    std::getline(file, uuid);
+    file.close();
+
+    if (uuid.empty()) {
+      BOOST_LOG(warning) << "[SMBIOS_UUID] Linux: Empty product_uuid read from DMI";
+      return ERROR_UUID;
+    }
+
+    BOOST_LOG(info) << "[SMBIOS_UUID] Linux: Successfully read product UUID";
+    return validate_and_format_uuid(uuid);
+  }
+#endif
+
+#ifdef _WIN32
+  /**
+   * @brief Windows implementation - read standard SMBIOS UUID via WMI Win32_ComputerSystemProduct
+   */
+  std::string get_smbios_uuid_windows() {
+    BOOST_LOG(info) << "[SMBIOS_UUID] Windows: Reading SMBIOS UUID via WMI";
+
+    HRESULT hres;
+
+    hres = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hres)) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Failed to initialize COM library. Error: " << std::hex << hres;
+      return ERROR_UUID;
+    }
+
+    hres = CoInitializeSecurity(
+      NULL,
+      -1,
+      NULL,
+      NULL,
+      RPC_C_AUTHN_LEVEL_NONE,
+      RPC_C_IMP_LEVEL_IMPERSONATE,
+      NULL,
+      EOAC_NONE,
+      NULL
+    );
+
+    // RPC_E_TOO_LATE means security was already initialized (e.g. by get_board_uuid_windows); tolerate it.
+    if (FAILED(hres) && hres != RPC_E_TOO_LATE) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Failed to initialize security. Error: " << std::hex << hres;
+      CoUninitialize();
+      return ERROR_UUID;
+    }
+
+    IWbemLocator *pLoc = NULL;
+    hres = CoCreateInstance(
+      CLSID_WbemLocator,
+      0,
+      CLSCTX_INPROC_SERVER,
+      IID_IWbemLocator, (LPVOID *) &pLoc);
+
+    if (FAILED(hres)) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Failed to create IWbemLocator object. Error: " << std::hex << hres;
+      CoUninitialize();
+      return ERROR_UUID;
+    }
+
+    IWbemServices *pSvc = NULL;
+    hres = pLoc->ConnectServer(
+      (BSTR)L"ROOT\\CIMV2",
+      NULL,
+      NULL,
+      0,
+      0,
+      0,
+      0,
+      &pSvc
+    );
+
+    if (FAILED(hres)) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Could not connect to WMI. Error: " << std::hex << hres;
+      pLoc->Release();
+      CoUninitialize();
+      return ERROR_UUID;
+    }
+
+    hres = CoSetProxyBlanket(
+      pSvc,
+      RPC_C_AUTHN_WINNT,
+      RPC_C_AUTHZ_NONE,
+      NULL,
+      RPC_C_AUTHN_LEVEL_CALL,
+      RPC_C_IMP_LEVEL_IMPERSONATE,
+      NULL,
+      EOAC_NONE
+    );
+
+    if (FAILED(hres)) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Could not set proxy blanket. Error: " << std::hex << hres;
+      pSvc->Release();
+      pLoc->Release();
+      CoUninitialize();
+      return ERROR_UUID;
+    }
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hres = pSvc->ExecQuery(
+      (BSTR)L"WQL",
+      (BSTR)L"SELECT UUID FROM Win32_ComputerSystemProduct",
+      WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+      NULL,
+      &pEnumerator);
+
+    if (FAILED(hres)) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Windows: Query for SMBIOS UUID failed. Error: " << std::hex << hres;
+      pSvc->Release();
+      pLoc->Release();
+      CoUninitialize();
+      return ERROR_UUID;
+    }
+
+    IWbemClassObject *pclsObj = NULL;
+    ULONG uReturn = 0;
+    std::string uuid;
+
+    while (pEnumerator) {
+      HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+
+      if (0 == uReturn) {
+        break;
+      }
+
+      VARIANT vtProp;
+      VariantInit(&vtProp);
+
+      hr = pclsObj->Get(L"UUID", 0, &vtProp, 0, 0);
+      if (SUCCEEDED(hr) && vtProp.vt == VT_BSTR && vtProp.bstrVal != NULL) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, vtProp.bstrVal, -1, NULL, 0, NULL, NULL);
+        if (len > 0) {
+          char* buffer = new char[len];
+          WideCharToMultiByte(CP_UTF8, 0, vtProp.bstrVal, -1, buffer, len, NULL, NULL);
+          uuid = std::string(buffer);
+          delete[] buffer;
+          BOOST_LOG(info) << "[SMBIOS_UUID] Windows: Successfully retrieved SMBIOS UUID";
+        }
+      }
+
+      VariantClear(&vtProp);
+      pclsObj->Release();
+      break; // Take first result
+    }
+
+    if (pEnumerator) pEnumerator->Release();
+    if (pSvc) pSvc->Release();
+    if (pLoc) pLoc->Release();
+    CoUninitialize();
+
+    if (uuid.empty()) {
+      BOOST_LOG(warning) << "[SMBIOS_UUID] Windows: No SMBIOS UUID found via WMI";
+      return ERROR_UUID;
+    }
+
+    return validate_and_format_uuid(uuid);
+  }
+#endif
+
   /**
    * @brief Main function to get board UUID across platforms
    */
@@ -319,6 +500,59 @@ namespace board_uuid {
       BOOST_LOG(error) << "[BOARD_UUID] Unknown exception occurred";
       cached_uuid = ERROR_UUID;
       uuid_cached = true;
+      return ERROR_UUID;
+    }
+  }
+
+  /**
+   * @brief Main function to get standard SMBIOS system UUID across platforms
+   *
+   * If config uuid is explicitly set, smbios uses that same value (smbios == uuid).
+   * Otherwise reads the standard SMBIOS type-1 System UUID from the platform.
+   */
+  std::string get_smbios_uuid() {
+    if (smbios_uuid_cached) {
+      BOOST_LOG(debug) << "[SMBIOS_UUID] Returning cached UUID: " << cached_smbios_uuid;
+      return cached_smbios_uuid;
+    }
+
+    BOOST_LOG(info) << "[SMBIOS_UUID] Getting SMBIOS system UUID...";
+
+    try {
+      std::string uuid;
+
+      // User-specified uuid takes precedence: smbios == uuid
+      if (!config::sunshine.uuid.empty()) {
+        BOOST_LOG(info) << "[SMBIOS_UUID] Using UUID from config file (smbios uses same value)";
+        uuid = validate_and_format_uuid(config::sunshine.uuid);
+      } else {
+#ifdef __linux__
+        uuid = get_smbios_uuid_linux();
+#elif defined(_WIN32)
+        uuid = get_smbios_uuid_windows();
+#elif defined(__APPLE__)
+        uuid = MACOS_UUID;
+#else
+        BOOST_LOG(warning) << "[SMBIOS_UUID] Unsupported platform, returning error UUID";
+        uuid = ERROR_UUID;
+#endif
+      }
+
+      cached_smbios_uuid = uuid;
+      smbios_uuid_cached = true;
+
+      BOOST_LOG(info) << "[SMBIOS_UUID] UUID cached for future use: " << cached_smbios_uuid;
+      return cached_smbios_uuid;
+
+    } catch (const std::exception& e) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Exception occurred: " << e.what();
+      cached_smbios_uuid = ERROR_UUID;
+      smbios_uuid_cached = true;
+      return ERROR_UUID;
+    } catch (...) {
+      BOOST_LOG(error) << "[SMBIOS_UUID] Unknown exception occurred";
+      cached_smbios_uuid = ERROR_UUID;
+      smbios_uuid_cached = true;
       return ERROR_UUID;
     }
   }

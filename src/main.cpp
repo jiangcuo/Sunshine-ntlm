@@ -393,6 +393,8 @@ int main(int argc, char *argv[]) {
   BOOST_LOG(info) << "Testing board UUID functionality...";
   auto board_uuid = util::board_uuid::get_board_uuid();
   BOOST_LOG(info) << "Board UUID: " << board_uuid;
+  auto smbios_uuid = util::board_uuid::get_smbios_uuid();
+  BOOST_LOG(info) << "SMBIOS UUID: " << smbios_uuid;
 
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};

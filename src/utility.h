@@ -1085,6 +1085,23 @@ namespace util {
     std::string get_board_uuid();
 
     /**
+     * @brief Get standard SMBIOS system UUID in a cross-platform way
+     * @return UUID string in standard format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+     *
+     * Distinct from get_board_uuid() (PXVIRT private, board serial). This reads the
+     * standard SMBIOS type-1 "System UUID" for PVE-mode reconciliation with the
+     * server's `smbios1: uuid=...`.
+     *
+     * Platform behavior:
+     * - If config uuid is explicitly set: returns that same value (smbios == uuid)
+     * - Linux: Read from /sys/devices/virtual/dmi/id/product_uuid (root usually required)
+     * - Windows: Read UUID via WMI (Win32_ComputerSystemProduct.UUID)
+     * - macOS: Return 00000000-0000-0000-0000-000000000000
+     * - Error: Return FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF
+     */
+    std::string get_smbios_uuid();
+
+    /**
      * @brief Convert serial string to UUID format
      * @param serial Raw serial number string
      * @return Formatted UUID string
